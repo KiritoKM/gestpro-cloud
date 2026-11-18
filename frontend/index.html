@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GestPro Cloud</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Pantalla de inicio de sesión -->
+  <section id="login-view" class="login">
+    <form id="login-form" class="login-card">
+      <div class="brand big"><span class="logo">GP</span> GestPro <b>Cloud</b></div>
+      <p class="muted">Inventario y punto de venta multi-sede · microservicios en Docker Swarm</p>
+      <label>Usuario <input name="username" autocomplete="username" required></label>
+      <label>Contraseña <input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="btn primary" type="submit">Iniciar sesión</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <!-- Aplicación -->
+  <section id="app-view" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="logo">GP</span> GestPro <b>Cloud</b></div>
+      <nav id="nav"></nav>
+      <div class="sidebar-foot">
+        <div id="user-chip" class="user-chip"></div>
+        <button id="logout" class="btn ghost small">Cerrar sesión</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <h1 id="view-title"></h1>
+        <div class="topbar-right">
+          <label class="sede">Sede <select id="sede-select"></select></label>
+        </div>
+      </header>
+      <div id="view" class="view"></div>
+      <footer class="replica-bar">
+        Última respuesta atendida por <code id="last-replica">—</code>
+        <span class="muted">· HAProxy reparte en round-robin entre las réplicas de cada servicio</span>
+      </footer>
+    </main>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

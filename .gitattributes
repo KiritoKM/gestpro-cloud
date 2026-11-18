@@ -1,0 +1,4 @@
+# Los archivos que van dentro de los contenedores (Linux) siempre con LF, aunque se clone en Windows
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.xlsx binary

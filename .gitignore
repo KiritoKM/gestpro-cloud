@@ -1,0 +1,27 @@
+# Secretos de Docker Swarm (se generan con scripts/deploy.ps1)
+secrets/
+
+# Bases de datos y logs locales (la BD del monolito tiene datos reales del negocio)
+*.db
+*.log
+
+# Material de la sustentación (no es parte del software)
+docs/guion*
+*.pdf
+*.pptx
+presentacion/
+
+# Respaldos de draw.io
+*.bkp
+.$*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

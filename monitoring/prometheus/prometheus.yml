@@ -1,0 +1,28 @@
+# Prometheus para GestPro Cloud.
+# dns_sd_configs + "tasks.<servicio>" descubre la IP de CADA réplica en Swarm:
+# así se mide réplica por réplica y se ve en vivo cuando una cae o se escala.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: auth-users
+    dns_sd_configs: [{ names: [tasks.auth-users], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: catalog-inventory
+    dns_sd_configs: [{ names: [tasks.catalog-inventory], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: pos-sales
+    dns_sd_configs: [{ names: [tasks.pos-sales], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: cash-expenses
+    dns_sd_configs: [{ names: [tasks.cash-expenses], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: clients-credits
+    dns_sd_configs: [{ names: [tasks.clients-credits], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: billing-factus
+    dns_sd_configs: [{ names: [tasks.billing-factus], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: mr-coordinator
+    dns_sd_configs: [{ names: [tasks.mr-coordinator], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: mr-worker
+    dns_sd_configs: [{ names: [tasks.mr-worker], type: A, port: 8000, refresh_interval: 5s }]
+  - job_name: gateway-haproxy
+    dns_sd_configs: [{ names: [tasks.gateway], type: A, port: 8404, refresh_interval: 5s }]
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]

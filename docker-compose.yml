@@ -1,0 +1,340 @@
+# ─────────────────────────────────────────────────────────────
+# GestPro Cloud — stack de microservicios para Docker Swarm
+#
+# Desplegar (construye imágenes + docker stack deploy):
+#     .\scripts\deploy.ps1
+#
+# Comandos útiles:
+#     docker stack services gestpro
+#     docker service ps gestpro_pos-sales
+#     docker service scale gestpro_pos-sales=5
+# ─────────────────────────────────────────────────────────────
+version: "3.8"
+
+# Bloques reutilizables (anclas YAML)
+x-deploy-app: &deploy-app
+  restart_policy:            # si el contenedor falla, Swarm lo vuelve a crear
+    condition: on-failure
+    delay: 5s
+  update_config:             # actualización gradual, réplica por réplica
+    parallelism: 1
+    delay: 5s
+    order: start-first
+    monitor: 20s
+    failure_action: rollback # si la nueva versión falla el healthcheck -> rollback
+  rollback_config:
+    parallelism: 1
+    order: start-first
+  resources:
+    limits:
+      memory: 256M
+
+x-healthcheck: &healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+  interval: 5s
+  timeout: 3s
+  retries: 3
+  start_period: 15s
+
+x-postgres: &postgres
+  image: postgres:15-alpine
+  command: ["postgres", "-c", "shared_buffers=16MB", "-c", "max_connections=40"]
+  networks: [net]
+  secrets: [db_password]
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U gestpro"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+  deploy:
+    replicas: 1
+    placement:
+      constraints: [node.role == manager]   # el volumen vive en el nodo manager
+    restart_policy:
+      condition: on-failure
+    resources:
+      limits:
+        memory: 256M
+
+services:
+  # ── Ingesta y acceso seguro ─────────────────────────────────
+  gateway:
+    image: gestpro/gateway:${TAG:-dev}
+    build: ./gateway
+    ports:
+      - "8080:8080"   # única entrada a la plataforma (API + frontend)
+      - "8404:8404"   # estadísticas de HAProxy (/stats) y métricas (/metrics)
+    secrets: [jwt_secret]
+    networks: [net]
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  # ── Bus de eventos asíncrono ────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]   # AOF: los eventos sobreviven a reinicios
+    volumes: [redis-data:/data]
+    networks: [net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+
+  # ── Microservicios (FastAPI) ────────────────────────────────
+  auth-users:
+    image: gestpro/auth-users:${TAG:-dev}
+    build: ./services/auth-users
+    environment:
+      SERVICE_NAME: auth-users
+      DB_HOST: db-auth
+      DB_NAME: auth_db
+    secrets: [db_password, jwt_secret]
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  catalog-inventory:
+    image: gestpro/catalog-inventory:${TAG:-dev}
+    build: ./services/catalog-inventory
+    environment:
+      SERVICE_NAME: catalog-inventory
+      DB_HOST: db-inventory
+      DB_NAME: inventory_db
+      REDIS_HOST: redis
+    secrets: [db_password]
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  pos-sales:
+    image: gestpro/pos-sales:${TAG:-dev}
+    build: ./services/pos-sales
+    environment:
+      SERVICE_NAME: pos-sales
+      DB_HOST: db-sales
+      DB_NAME: sales_db
+      REDIS_HOST: redis
+      INVENTORY_URL: http://catalog-inventory:8000
+    secrets: [db_password]
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 3
+
+  cash-expenses:
+    image: gestpro/cash-expenses:${TAG:-dev}
+    build: ./services/cash-expenses
+    environment:
+      SERVICE_NAME: cash-expenses
+      DB_HOST: db-cash
+      DB_NAME: cash_db
+      REDIS_HOST: redis
+    secrets: [db_password]
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  clients-credits:
+    image: gestpro/clients-credits:${TAG:-dev}
+    build: ./services/clients-credits
+    environment:
+      SERVICE_NAME: clients-credits
+      DB_HOST: db-clients
+      DB_NAME: clients_db
+      REDIS_HOST: redis
+    secrets: [db_password]
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  billing-factus:
+    image: gestpro/billing-factus:${TAG:-dev}
+    build: ./services/billing-factus
+    environment:
+      SERVICE_NAME: billing-factus
+      DB_HOST: db-billing
+      DB_NAME: billing_db
+      REDIS_HOST: redis
+      FACTUS_MODE: ${FACTUS_MODE:-sandbox}   # sandbox = API real de Factus | simulado = plan B
+    secrets: [db_password, factus_credentials]   # solo este servicio ve las credenciales de Factus
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  # ── Procesamiento paralelo (MapReduce) ──────────────────────
+  mr-coordinator:
+    image: gestpro/mapreduce:${TAG:-dev}
+    build:
+      context: .
+      dockerfile: mapreduce/Dockerfile
+    command: ["uvicorn", "coordinator:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SERVICE_NAME: mr-coordinator
+      REDIS_HOST: redis
+      POS_SALES_URL: http://pos-sales:8000
+      MR_SYNTHETIC_ROWS: "2000000"     # histórico sintético (capa bronze)
+      MR_SYNTHETIC_FILES: "8"
+      MR_SPLIT_MB: "8"                 # tamaño de cada partición (input split)
+    volumes: [mr-data:/data]           # bronze / silver / gold
+    networks: [net]
+    healthcheck: *healthcheck
+    deploy:
+      <<: *deploy-app
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        limits:
+          memory: 512M
+
+  mr-worker:
+    image: gestpro/mapreduce:${TAG:-dev}
+    command: ["python", "-u", "worker.py"]
+    environment:
+      SERVICE_NAME: mr-worker
+      REDIS_HOST: redis
+    volumes: [mr-data:/data]
+    networks: [net]
+    healthcheck: *healthcheck           # el servidor de métricas del worker responde en :8000
+    deploy:
+      <<: *deploy-app
+      replicas: 3                       # docker service scale gestpro_mr-worker=N
+      placement:
+        constraints: [node.role == manager]   # comparten el volumen local (en multi-nodo: HDFS/NFS)
+
+  # ── Interfaz web ────────────────────────────────────────────
+  frontend:
+    image: gestpro/frontend:${TAG:-dev}
+    build: ./frontend
+    networks: [net]
+    deploy:
+      <<: *deploy-app
+      replicas: 2
+
+  # ── Observabilidad ──────────────────────────────────────────
+  prometheus:
+    image: gestpro/prometheus:${TAG:-dev}
+    build: ./monitoring/prometheus
+    ports: ["9090:9090"]
+    volumes: [prometheus-data:/prometheus]
+    networks: [net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+
+  grafana:
+    image: gestpro/grafana:${TAG:-dev}
+    build: ./monitoring/grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_AUTH_ANONYMOUS_ENABLED: "true"        # en la demo el dashboard se ve sin iniciar sesión
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/gestpro.json
+    secrets: [grafana_admin_password]
+    volumes: [grafana-data:/var/lib/grafana]
+    networks: [net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+
+  # ── Capa de datos transaccional (Database per Service) ──────
+  db-auth:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: gestpro
+      POSTGRES_DB: auth_db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes: [db-auth-data:/var/lib/postgresql/data]
+
+  db-inventory:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: gestpro
+      POSTGRES_DB: inventory_db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes: [db-inventory-data:/var/lib/postgresql/data]
+
+  db-sales:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: gestpro
+      POSTGRES_DB: sales_db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes: [db-sales-data:/var/lib/postgresql/data]
+
+  db-cash:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: gestpro
+      POSTGRES_DB: cash_db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes: [db-cash-data:/var/lib/postgresql/data]
+
+  db-clients:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: gestpro
+      POSTGRES_DB: clients_db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes: [db-clients-data:/var/lib/postgresql/data]
+
+  db-billing:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: gestpro
+      POSTGRES_DB: billing_db
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    volumes: [db-billing-data:/var/lib/postgresql/data]
+
+networks:
+  net:
+    driver: overlay
+    attachable: true   # permite conectar contenedores de apoyo (p. ej. la migración)
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  factus_credentials:
+    file: ./secrets/factus_credentials.json
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+
+volumes:
+  mr-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  db-auth-data:
+  db-inventory-data:
+  db-sales-data:
+  db-cash-data:
+  db-clients-data:
+  db-billing-data:
